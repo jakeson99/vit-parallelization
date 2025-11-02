@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from typing import Optional, Tuple
+from torch.nn import functional as F
 
 
 class ViT:
@@ -16,6 +17,105 @@ class ViT:
     def forward(self, *args, **kwargs):
         """Forward pass for the ViT model (to be implemented)."""
         pass
+
+
+class MultiHeadSelfAttention(nn.Module):
+    """
+    Multi-Head Self-Attention mechanism.
+
+    This class implements the multi-head self-attention mechanism used in transformer architectures.
+    Usage:
+        attention = MultiHeadSelfAttention()
+        # Add methods and attributes as needed.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = True,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        use_sdpa: bool = False,
+    ):
+        super().__init__()
+
+        assert dim % num_heads == 0, "Dimension must be divisible by number of heads."
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim**-0.5
+
+        # setup one set of q, k, v projections for all heads
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # by default use PyTorch's scaled dot-product attention if available
+        if use_sdpa is None:
+            self.use_sdpa = hasattr(F, "scaled_dot_product_attention")
+        else:
+            self.use_sdpa = use_sdpa
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """Re-initialize learnable parameters."""
+        # Initialise weights and biases
+        # for ViT, standard is to use truncated normal initialisation with std=0.02
+        nn.init.trunc_normal_(self.qkv.weight, std=0.02)
+        if self.qkv.bias is not None:
+            nn.init.zeros_(self.qkv.bias)
+        nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        B, N, D = x.shape
+
+        assert D == self.dim, f"Expected input dim {self.dim}, instead got {D}."
+
+        # qkv: (B, N, 3*D) -> split -> (3, B, H, N, head_dim)
+        qkv = (
+            self.qkv(x)
+            .reshape(B, N, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = qkv.unbind(dim=0)  # each: (B, H, N, head_dim)
+
+        if self.use_sdpa:
+            # use PyTorch's built-in scaled dot-product attention
+            attn = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+                is_causal=False,
+            )  # (B, H, N, head_dim)
+
+        else:
+            # manual implementation of scaled dot-product attention
+            scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, N, N)
+
+            if attn_mask is not None:
+                # support both bool and additive masks
+                if attn_mask.dtype == torch.bool:
+                    scores = scores.masked_fill(~attn_mask, float("-inf"))
+                else:
+                    scores = scores + attn_mask
+            attn = scores.softmax(dim=-1)  # (B, H, N, N)
+            attn = self.attn_drop(attn)
+            attn = torch.matmul(attn, v)  # (B, H, N, head_dim)
+
+        # merge all heads
+        attn = attn.transpose(1, 2).reshape(B, N, D)  # (B, N, D)
+        out = self.proj(attn)
+        out = self.proj_drop(out)
+        return out
 
 
 class PatchEmbed(nn.Module):
