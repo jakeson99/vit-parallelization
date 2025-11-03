@@ -1,32 +1,31 @@
+"""Vision Transformer (ViT) model components.
+Implements the core modules of the Vision Transformer architecture, including
+Multi-Head Self-Attention, Patch Embedding, and Transformer Blocks.
+References:
+    - "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale"
+      (Dosovitskiy et al., 2020)
+"""
+
 import torch
 from torch import nn
 from typing import Optional, Tuple
 from torch.nn import functional as F
 
 
-class ViT:
-    """
-    Vision Transformer (ViT) model.
-
-    This class implements the Vision Transformer architecture for image classification tasks.
-    Usage:
-        model = ViT()
-        # Add methods and attributes as needed.
-    """
-
-    def forward(self, *args, **kwargs):
-        """Forward pass for the ViT model (to be implemented)."""
-        pass
-
-
 class MultiHeadSelfAttention(nn.Module):
     """
-    Multi-Head Self-Attention mechanism.
-
-    This class implements the multi-head self-attention mechanism used in transformer architectures.
-    Usage:
-        attention = MultiHeadSelfAttention()
-        # Add methods and attributes as needed.
+    Multi-Head Self-Attention module.
+    Implements the multi-head self-attention mechanism.
+    Args:
+        dim (int): Dimension of the input features.
+        num_heads (int): Number of attention heads.
+        qkv_bias (bool): If True, add a learnable bias to query, key, value projections.
+        attn_drop (float): Dropout probability for attention weights.
+        proj_drop (float): Dropout probability for output projection.
+        use_sdpa (bool): If True, use PyTorch's built-in scaled dot-product attention.
+                         If False, use manual implementation. If None, auto-detect.
+    Returns:
+        torch.Tensor: Output tensor after applying multi-head self-attention.
     """
 
     def __init__(
@@ -122,6 +121,15 @@ class PatchEmbed(nn.Module):
     """
     Patch embeding divides image up into smaller patches,
     flattens to 1D and then maps via a linear projection to a D dimension tensor.
+    Args:
+        img_size (Tuple[int, int]): Size of the input image (H, W).
+        patch_size (int): Size of each patch (assumed square).
+        in_chans (int): Number of input channels (e.g., 3 for RGB images).
+        embed_dim (int): Dimension of the output embedding.
+        flatten (bool): If True, flatten the output to (B, N, D). If False, keep as (B, D, H', W').
+        norm_layer (Optional[nn.Module]): Optional normalization layer to apply after projection.
+    Returns:
+        torch.Tensor: Output tensor of shape (B, N, D) if flatten is True, else (B, D, H', W').
     """
 
     def __init__(
@@ -175,4 +183,81 @@ class PatchEmbed(nn.Module):
         x = self.norm(x)
         if self.flatten:
             x = x.flatten(2).transpose(1, 2)  # (B, N, D)
+        return x
+
+
+class ViT:
+    """
+    Vision Transformer (ViT) model.
+
+    This class implements the Vision Transformer architecture for image classification tasks.
+    Usage:
+        model = ViT()
+        # Add methods and attributes as needed.
+    """
+
+    def forward(self, *args, **kwargs):
+        """Forward pass for the ViT model (to be implemented)."""
+        pass
+
+
+class Block(nn.Module):
+    """
+    Transformer block consisting of multi-head self-attention and MLP.
+    Args:
+        dim (int): Dimension of the input features.
+        num_heads (int): Number of attention heads.
+        mlp_ratio (float): Ratio of hidden dimension in MLP to input dimension.
+        attn_drop (float): Dropout probability for attention weights.
+        proj_drop (float): Dropout probability for output projection.
+        drop (float): Dropout probability for MLP.
+    Returns:
+        torch.Tensor: Output tensor after applying the Transformer block.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        drop: float = 0.0,
+    ):
+        super().__init__()
+
+        # 1st Normalisation before attention
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = MultiHeadSelfAttention(
+            dim, num_heads, attn_drop=attn_drop, proj_drop=proj_drop
+        )
+
+        # 2nd Normalisation before MLP
+        self.norm2 = nn.LayerNorm(dim)
+        # get number of hidden dimensions in MLP
+        hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features=dim, out_features=hidden_dim),
+            nn.GELU(),
+            nn.Linear(in_features=hidden_dim, out_features=dim),
+            nn.Dropout(drop),
+        )
+
+        # Initialise parameters using ViT defaults
+        for m in self.mlp:
+            # check for Linear layers and initialise with truncated normal
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the Transformer Block.
+        """
+        # equation 2 in the ViT paper (MSA block: x + MSA(LN(x)))
+        x = x + self.attn(self.norm1(x))
+
+        # equation 3 in the ViT paper (MLP block: x + MLP(LN(x)))
+        x = x + self.mlp(self.norm2(x))
         return x
