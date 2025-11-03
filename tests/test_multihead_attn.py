@@ -1,3 +1,5 @@
+"""Tests for the Multi-Head Self-Attention module."""
+
 import torch
 import pytest
 

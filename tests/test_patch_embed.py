@@ -1,3 +1,5 @@
+"""Tests for the Patch Embedding module."""
+
 import torch
 import pytest
 
