@@ -1,0 +1,43 @@
+seed: 978463
+
+model:
+  name: vit
+  params:
+    img_size: [32, 32]
+    patch_size: 4
+    in_chans: 3
+    num_classes: 10
+    embed_dim: 192
+    depth: 12
+    num_heads: 3
+    mlp_ratio: 4.0
+    qkv_bias: true
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop: 0.0
+    flatten: true
+
+dataloaders:
+  name: cifar10
+  params:
+    batch_size: 256
+    num_workers: 8
+    aug: randaug
+    pin_memory: true
+    prefetch_factor: 4
+    persistent_workers: true
+    root: "./data"
+
+optimizer:
+  name: adamw
+  params:
+    lr: 0.0003
+    weight_decay: 0.05
+
+train:
+  epochs: 100
+  amp: true
+  grad_clip: 1.0
+  log_interval: 50
+  save_every: 10
+  output_dir: runs/cifar_vit_tiny

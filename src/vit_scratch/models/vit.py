@@ -186,21 +186,6 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class ViT:
-    """
-    Vision Transformer (ViT) model.
-
-    This class implements the Vision Transformer architecture for image classification tasks.
-    Usage:
-        model = ViT()
-        # Add methods and attributes as needed.
-    """
-
-    def forward(self, *args, **kwargs):
-        """Forward pass for the ViT model (to be implemented)."""
-        pass
-
-
 class Block(nn.Module):
     """
     Transformer block consisting of multi-head self-attention and MLP.
@@ -219,6 +204,7 @@ class Block(nn.Module):
         self,
         dim: int,
         num_heads: int,
+        qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
@@ -261,3 +247,133 @@ class Block(nn.Module):
         # equation 3 in the ViT paper (MLP block: x + MLP(LN(x)))
         x = x + self.mlp(self.norm2(x))
         return x
+
+
+class ViT(nn.Module):
+    """
+    Vision Transformer (ViT) model.
+    Implements the Vision Transformer architecture as described in
+    "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale"
+    (Dosovitskiy, et al., 2020).
+
+    Args:
+        img_size (Tuple[int, int]): Size of the input image (H, W).
+        patch_size (int): Size of each patch (assumed square).
+        in_chans (int): Number of input channels (e.g., 3 for RGB images).
+        num_classes (int): Number of output classes for classification.
+        embed_dim (int): Dimension of the patch embeddings.
+        depth (int): Number of Transformer blocks.
+        num_heads (int): Number of attention heads in each Transformer block.
+        mlp_ratio (float): Ratio of hidden dimension in MLP to input dimension.
+        qvk_bias (bool): If True, add a learnable bias to query, key, value projections.
+        attn_drop (float): Dropout probability for attention weights.
+        proj_drop (float): Dropout probability for output projection.
+        drop (float): Dropout probability for MLP.
+        flatten (bool): If True, flatten patch embeddings to (B, N, D). If False, keep as (B, D, H', W').
+        norm_layer (Optional[nn.Module]): Optional normalization layer to apply after patch embedding.
+    Returns:
+        torch.Tensor: Output logits tensor of shape (B, num_classes).
+    """
+
+    def __init__(
+        self,
+        img_size: Tuple[int, int] = (32, 32),
+        patch_size: int = 4,
+        in_chans: int = 3,
+        num_classes: int = 10,
+        embed_dim: int = 192,
+        depth: int = 12,
+        num_heads: int = 3,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        drop: float = 0.0,
+        flatten: bool = True,
+        norm_layer: Optional[nn.Module] = None,
+    ):
+        """Initialize the ViT model components."""
+        super().__init__()
+
+        # Equation 1 Create patch embedding layer
+        self.patch_embed = PatchEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            flatten=flatten,
+            norm_layer=norm_layer,
+        )
+        self.num_patches = self.patch_embed.num_patches
+        self.embed_dim = embed_dim
+
+        # Create class token and position embeddings
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, embed_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        self.pos_drop = nn.Dropout(p=drop)
+
+        # Equation 2 and 3 Create Transformer blocks (MSA + MLP)
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    qkv_bias=qkv_bias,
+                    mlp_ratio=mlp_ratio,
+                    attn_drop=attn_drop,
+                    proj_drop=proj_drop,
+                    drop=drop,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+        # Equation 4 Final LayerNorm + classification head
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+        nn.init.trunc_normal_(self.head.weight, std=0.02)
+        nn.init.zeros_(self.head.bias)
+
+    @torch.no_grad()
+    def _interpolate_pos_embed(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Interpolate position embeddings to match input size. Optional at this stage for CIFAR10 with fixed size.
+        To be implemented if supporting variable image sizes.
+        """
+        return self.pos_embed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the ViT model.
+        Args:
+            x (torch.Tensor): Input image tensor of shape (B, C, H, W).
+        Returns:
+            torch.Tensor: Output logits tensor of shape (B, num_classes).
+        """
+        B = x.shape[0]
+
+        # Patch embedding
+        x = self.patch_embed(x)  # (B, N, D)
+
+        # Add class token
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
+        x = torch.cat((cls_tokens, x), dim=1)  # (B, N+1, D)
+
+        # Add position embeddings
+        x = x + self._interpolate_pos_embed(x)[:, : x.size(1), :]
+        x = self.pos_drop(x)
+
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x)
+
+        # Final normalization
+        x = self.norm(x)
+
+        # CLS head for classification
+        cls_final = x[:, 0]  # (B, D)
+        logits = self.head(cls_final)  # (B, num_classes)
+        return logits
