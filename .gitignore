@@ -12,6 +12,11 @@ wheels/
 # data
 data/
 
+# saved models
+checkpoints/
+
 # mlflow runs
 mlruns/
 
+#vscode data
+.vscode
