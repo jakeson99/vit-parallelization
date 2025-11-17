@@ -61,14 +61,16 @@ def train_epoch(
     epoch_idx: int = 0,
 ):
     model.train()
-    total_loss = 0.0
+    total_loss = correct = 0.0
 
     for batch_idx, batch in enumerate(dataloader):
         batch = [t.to(device) for t in batch]
         images, labels = batch
         optimizer.zero_grad()
 
-        loss = criterion(model(images), labels)
+        logits = model(images)
+
+        loss = criterion(logits, labels)
 
         loss.backward()
 
@@ -76,13 +78,21 @@ def train_epoch(
 
         total_loss += loss.item() * len(images)
 
+        predictions = torch.argmax(logits, dim=1)
+
+        correct += torch.sum(predictions == labels).item()
+
         if batch_idx % log_every == 0:
             mlflow.log_metric(
                 "batch_loss",
                 loss.item(),
                 step=epoch_idx * len(dataloader) + batch_idx,
             )
-    return total_loss / len(dataloader.dataset)
+
+    accuracy = correct / len(dataloader.dataset)
+    avg_loss = total_loss / len(dataloader.dataset)
+
+    return avg_loss, accuracy
 
 
 @torch.no_grad()
@@ -112,10 +122,7 @@ def evaluate(
     accuracy = correct / len(dataloader.dataset)
     avg_loss = total / len(dataloader.dataset)
 
-    mlflow.log_metric("eval_loss", avg_loss)
-    mlflow.log_metric("eval_accuracy", accuracy)
-
-    return avg_loss
+    return avg_loss, accuracy
 
 
 def maybe_save_checkpoint(
@@ -273,7 +280,7 @@ def train(
     output_dir,
 ):
     for epoch in range(1, epochs + 1):
-        train_loss = train_epoch(
+        train_loss, train_acc = train_epoch(
             model,
             trainloader,
             criterion,
@@ -283,7 +290,7 @@ def train(
             epoch_idx=epoch - 1,
         )
         if epoch % eval_every == 0:
-            test_loss = evaluate(
+            test_loss, test_acc = evaluate(
                 model,
                 testloader,
                 criterion,
@@ -295,7 +302,9 @@ def train(
         )
 
         mlflow.log_metric("epoch_train_loss", train_loss, step=epoch)
+        mlflow.log_metric("epoch_train_acc", train_acc, step=epoch)
         mlflow.log_metric("epoch_test_loss", test_loss, step=epoch)
+        mlflow.log_metric("epoch_test_acc", test_acc, step=epoch)
 
         if save_every and output_dir and epoch % save_every == 0:
             maybe_save_checkpoint(model, optimizer, None, epoch, output_dir)
