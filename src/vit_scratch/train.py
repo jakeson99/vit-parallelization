@@ -90,7 +90,7 @@ def train_epoch(
             )
 
     accuracy = correct / len(dataloader.dataset)
-    avg_loss = total_loss / len(dataloader.dataset)
+    avg_loss = total_loss / len(dataloader.dataset) 
 
     return avg_loss, accuracy
 
