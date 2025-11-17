@@ -62,8 +62,8 @@ def test_vit_cls_token_effect():
     with torch.no_grad():
         out_with_cls1 = model(x)
 
-        # modify cls token slightly
-        model.cls_token.add_(0.1)
+        # modify a single cls token feature (LayerNorm removes uniform shifts)
+        model.cls_token[..., 0].add_(0.1)
 
         out_with_cls2 = model(x)
 

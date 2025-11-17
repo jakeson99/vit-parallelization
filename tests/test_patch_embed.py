@@ -6,10 +6,10 @@ import pytest
 from vit_scratch.models.vit import PatchEmbed
 
 # get seed from TrainConf
-from vit_scratch.configs.train import TrainConf
+from vit_scratch.configs.configs import ExperimentConfig
 
 
-torch.manual_seed(TrainConf.seed)
+torch.manual_seed(ExperimentConfig.train.seed)
 
 
 @pytest.mark.parametrize(
