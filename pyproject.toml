@@ -10,6 +10,9 @@ dependencies = [
     "pytest>=8.4.2",
     "torch>=2.9.0",
     "torchvision>=0.24.0",
+    "pydra-config>=0.0.17.post1",
+    "mlflow>=3.6.0",
+    "psutil>=7.1.3",
 ]
 
 

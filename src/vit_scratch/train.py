@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from pathlib import Path
 import random
+from copy import deepcopy
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -13,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from vit_scratch.data.cifar10 import make_cifar10_dataloaders
 from vit_scratch.models.vit import ViT
+import mlflow
 
 
 MODEL_REGISTRY = {
@@ -23,8 +25,10 @@ DATA_REGISTRY = {
     "cifar10": make_cifar10_dataloaders,
 }
 
-OPTIMIZER_REGISTRY = {
-    "adamw": AdamW,
+OPTIMIZER_REGISTRY = {"adamw": AdamW}
+
+CRITERION_REGISTRY = {
+    "cross_entropy": nn.CrossEntropyLoss,
 }
 
 
@@ -37,8 +41,6 @@ def setup_seed(seed: int):
         torch.mps.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
 
 def get_device() -> torch.device:
@@ -54,47 +56,33 @@ def train_epoch(
     dataloader: DataLoader,
     criterion,
     optimizer: Optimizer,
-    *,
     device: torch.device,
-    scaler: GradScaler | None,
-    use_amp: bool,
-    grad_clip: float | None,
+    log_every: int = 10,
+    epoch_idx: int = 0,
 ):
     model.train()
     total_loss = 0.0
 
-    for images, labels in dataloader:
-        images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad(set_to_none=True)
+    for batch_idx, batch in enumerate(dataloader):
+        batch = [t.to(device) for t in batch]
+        images, labels = batch
+        optimizer.zero_grad()
 
-        autocast_ctx = (
-            torch.autocast(
-                device_type=device.type,
-                dtype=torch.bfloat16 if device.type == "cpu" else torch.float16,
+        loss = criterion(model(images), labels)
+
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += loss.item() * len(images)
+
+        if batch_idx % log_every == 0:
+            mlflow.log_metric(
+                "batch_loss",
+                loss.item(),
+                step=epoch_idx * len(dataloader) + batch_idx,
             )
-            if use_amp
-            else nullcontext()
-        )
-        with autocast_ctx:
-            logits = model(images)
-            loss = criterion(logits, labels)
-
-        if scaler is not None and use_amp:
-            scaler.scale(loss).backward()
-            if grad_clip is not None:
-                scaler.unscale_(optimizer)
-                clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            if grad_clip is not None:
-                clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-
-        total_loss += loss.item()
-
-    return total_loss / len(dataloader)
+    return total_loss / len(dataloader.dataset)
 
 
 @torch.no_grad()
@@ -108,15 +96,26 @@ def evaluate(
     model.eval()
     correct = total = 0
 
-    for images, labels in dataloader:
-        images, labels = images.to(device), labels.to(device)
+    for batch in dataloader:
+        batch = [t.to(device) for t in batch]
+        images, labels = batch
+
         logits = model(images)
 
-        pred = logits.argmax(dim=1)
-        correct += (pred == labels).sum().item()
-        total += labels.size(0)
+        loss = criterion(logits, labels)
 
-    return correct / total
+        total += loss.item() * len(images)
+
+        predictions = torch.argmax(logits, dim=1)
+        correct += torch.sum(predictions == labels).item()
+
+    accuracy = correct / len(dataloader.dataset)
+    avg_loss = total / len(dataloader.dataset)
+
+    mlflow.log_metric("eval_loss", avg_loss)
+    mlflow.log_metric("eval_accuracy", accuracy)
+
+    return avg_loss
 
 
 def maybe_save_checkpoint(
@@ -140,6 +139,17 @@ def maybe_save_checkpoint(
     )
 
 
+def _to_plain_dict(obj: Any) -> Any:
+    """Recursively convert Config/namespace objects to plain Python containers."""
+    if isinstance(obj, dict):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return obj.__class__(_to_plain_dict(v) for v in obj)
+    if hasattr(obj, "__dict__"):
+        return {k: _to_plain_dict(v) for k, v in vars(obj).items()}
+    return obj
+
+
 def _build_model(model_cfg: Dict[str, Any]) -> nn.Module:
     cfg = model_cfg or {}
     name = cfg.get("name", "vit").lower()
@@ -148,70 +158,193 @@ def _build_model(model_cfg: Dict[str, Any]) -> nn.Module:
     if isinstance(img_size, list):
         params["img_size"] = tuple(img_size)
     if name not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model '{name}'. Known models: {list(MODEL_REGISTRY)}")
+        raise ValueError(
+            f"Unknown model '{name}'. Known models: {list(MODEL_REGISTRY)}"
+        )
     return MODEL_REGISTRY[name](**params)
 
 
-def _build_dataloaders(data_cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
-    cfg = data_cfg or {}
-    name = cfg.get("name", "cifar10").lower()
-    params = cfg.get("params", {})
-    if name not in DATA_REGISTRY:
-        raise ValueError(f"Unknown dataloader '{name}'. Known loaders: {list(DATA_REGISTRY)}")
-    return DATA_REGISTRY[name](**params)
+def _build_dataloaders(
+    dataset,
+    num_workers,
+    aug,
+    pin_memory,
+    prefetch_factor,
+    persistent_workers,
+    root,
+    batch_size,
+):
+    if dataset not in DATA_REGISTRY:
+        raise ValueError(
+            f"Unknown dataloader '{dataset}'. Known loaders: {list(DATA_REGISTRY)}"
+        )
+
+    else:
+        params = {
+            "num_workers": num_workers,
+            "batch_size": batch_size,
+            "aug": aug,
+            "pin_memory": pin_memory,
+            "prefetch_factor": prefetch_factor,
+            "persistent_workers": persistent_workers,
+            "root": root,
+        }
+
+        return DATA_REGISTRY[dataset](**params)
 
 
 def _build_optimizer(
-    opt_cfg: Dict[str, Any],
+    optimizer_cfg: Any,
     model: nn.Module,
+    learning_rate: float | None = None,
+    weight_decay: float | None = None,
 ) -> Optimizer:
-    cfg = opt_cfg or {}
-    name = cfg.get("name", "adamw").lower()
-    params = cfg.get("params", {})
+    def _default_params():
+        params: Dict[str, Any] = {}
+        if learning_rate is not None:
+            params["lr"] = learning_rate
+        if weight_decay is not None:
+            params["weight_decay"] = weight_decay
+        return params
+
+    name = "adamw"
+    params: Dict[str, Any] = {}
+
+    if optimizer_cfg is None:
+        params = _default_params()
+    elif isinstance(optimizer_cfg, dict):
+        name = optimizer_cfg.get("name") or optimizer_cfg.get("optimizer") or "adamw"
+        params = dict(optimizer_cfg.get("params") or {})
+        if "lr" not in params and learning_rate is not None:
+            params["lr"] = learning_rate
+        if "weight_decay" not in params and weight_decay is not None:
+            params["weight_decay"] = weight_decay
+    else:
+        name = getattr(optimizer_cfg, "name", None) or getattr(
+            optimizer_cfg, "optimizer", "adamw"
+        )
+        params = _default_params()
+
+    name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
-        raise ValueError(f"Unknown optimizer '{name}'. Known optimizers: {list(OPTIMIZER_REGISTRY)}")
+        raise ValueError(
+            f"Unknown optimizer '{name}'. Known optimizers: {list(OPTIMIZER_REGISTRY)}"
+        )
     return OPTIMIZER_REGISTRY[name](model.parameters(), **params)
 
 
-def train_app(cfg: Dict[str, Any]):
-    seed = cfg.get("seed", 42)
-    train_cfg = cfg.get("train", {})
-    log_interval = train_cfg.get("log_interval", 1) or 1
-    save_every = train_cfg.get("save_every")
-    output_dir = train_cfg.get("output_dir")
+def _build_criterion(criterion_cfg: Any) -> nn.Module:
+    name = "cross_entropy"
+    params: Dict[str, Any] = {}
 
-    setup_seed(seed)
-    device = get_device()
+    if criterion_cfg is None:
+        pass
+    elif isinstance(criterion_cfg, dict):
+        name = criterion_cfg.get("name") or "cross_entropy"
+        params = dict(criterion_cfg.get("params") or {})
+    else:
+        name = getattr(criterion_cfg, "name", None) or "cross_entropy"
 
-    train_loader, test_loader = _build_dataloaders(cfg.get("dataloaders", {}))
-    model = _build_model(cfg.get("model", {})).to(device)
-    optimizer = _build_optimizer(cfg.get("optimizer", {}), model)
+    name = name.lower()
+    if name not in CRITERION_REGISTRY:
+        raise ValueError(
+            f"Unknown criterion '{name}'. Known criterions: {list(CRITERION_REGISTRY)}"
+        )
+    return CRITERION_REGISTRY[name](**params)
 
-    criterion = nn.CrossEntropyLoss()
-    use_amp = train_cfg.get("amp", True)
-    scaler = GradScaler(device=device.type) if use_amp else None
-    grad_clip = train_cfg.get("grad_clip")
-    total_epochs = train_cfg.get("epochs", 1)
 
-    for epoch in range(1, total_epochs + 1):
+def _setup_output_dir(out_dir: str):
+    ckpt_dir = Path(out_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    return ckpt_dir
+
+
+def train(
+    trainloader,
+    testloader,
+    epochs,
+    model,
+    optimizer,
+    criterion,
+    device,
+    save_every,
+    log_every,
+    eval_every,
+    output_dir,
+):
+    for epoch in range(1, epochs + 1):
         train_loss = train_epoch(
             model,
-            train_loader,
+            trainloader,
             criterion,
             optimizer,
             device=device,
-            scaler=scaler,
-            use_amp=use_amp,
-            grad_clip=grad_clip,
+            log_every=log_every,
+            epoch_idx=epoch - 1,
         )
-        test_accuracy = evaluate(model, test_loader, criterion, device=device)
-
-        if epoch % log_interval == 0 or epoch == 1:
-            print(
-                f"[{epoch}/{total_epochs}] "
-                f"loss={train_loss:.4f} "
-                f"acc={test_accuracy * 100:.2f}%"
+        if epoch % eval_every == 0:
+            test_loss = evaluate(
+                model,
+                testloader,
+                criterion,
+                device=device,
             )
 
+        print(
+            f"[{epoch}/{epochs}] train_loss={train_loss:.4f} test_loss={test_loss:.4f}"
+        )
+
+        mlflow.log_metric("epoch_train_loss", train_loss, step=epoch)
+        mlflow.log_metric("epoch_test_loss", test_loss, step=epoch)
+
         if save_every and output_dir and epoch % save_every == 0:
-            maybe_save_checkpoint(model, optimizer, scaler, epoch, output_dir)
+            maybe_save_checkpoint(model, optimizer, None, epoch, output_dir)
+
+
+def run_training(cfg: Any):
+    with mlflow.start_run():
+        mlflow.log_params(cfg.to_dict())
+
+        seed = cfg.training.seed
+        batch_size = cfg.training.batch_size
+        setup_seed(seed)
+
+        device = get_device()
+
+        train_loader, test_loader = _build_dataloaders(
+            dataset=cfg.data.dataset,
+            num_workers=cfg.data.num_workers,
+            aug=cfg.data.aug,
+            pin_memory=cfg.data.pin_memory,
+            prefetch_factor=cfg.data.prefetch_factor,
+            persistent_workers=cfg.data.persistent_workers,
+            root=cfg.data.root,
+            batch_size=batch_size,
+        )
+
+        model = _build_model(cfg.model.to_dict()).to(device)
+
+        optimizer = _build_optimizer(
+            optimizer_cfg=cfg.optimizer,
+            learning_rate=cfg.optimizer.learning_rate,
+            weight_decay=cfg.optimizer.weight_decay,
+            model=model,
+        )
+
+        criterion = _build_criterion(cfg.optimizer.criterion)
+
+        output_dir = _setup_output_dir(cfg.training.out_dir)
+
+        train(
+            train_loader,
+            test_loader,
+            epochs=cfg.training.num_epochs,
+            model=model,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=device,
+            save_every=cfg.training.save_every,
+            log_every=cfg.training.log_every,
+            eval_every=cfg.training.eval_every,
+            output_dir=output_dir,
+        )

@@ -1,37 +1,19 @@
-import argparse
-from pathlib import Path
-from typing import Any, Dict
+import pydra
 
-import yaml
-
-from vit_scratch.train import train_app
+from vit_scratch.train import run_training
+from vit_scratch.configs.configs import ExperimentConfig
+import mlflow
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "experiment.yaml"
+@pydra.main(ExperimentConfig)
+def main(cfg: ExperimentConfig):
+    # Start an mlflow experiment
+    mlflow.set_experiment("ViT from Scratch Single Node Experiment")
 
-
-def load_config(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Vision Transformer training launcher.")
-    parser.add_argument(
-        "--config",
-        "-c",
-        type=Path,
-        default=DEFAULT_CONFIG,
-        help=f"Path to YAML config (default: {DEFAULT_CONFIG})",
-    )
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    cfg = load_config(args.config)
-    train_app(cfg)
+    # Enable system metrics monitoring
+    mlflow.config.enable_system_metrics_logging()
+    mlflow.config.set_system_metrics_sampling_interval(1)
+    run_training(cfg)
 
 
 if __name__ == "__main__":
